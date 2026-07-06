@@ -1,4 +1,5 @@
 import { YoutubeTranscript } from "youtube-transcript"
+import { fetchWithBrowserHeaders } from "./fetchProxy"
 import { generateText, generateObject } from "ai"
 import { z } from "zod"
 import { getChatModel } from "./provider"
@@ -28,6 +29,12 @@ export class TranscriptError extends Error {}
 // ---- Transcript fetch via captions (BRD 5.3 / 8.2) ----
 // Videos without captions are rejected, not run through speech-to-text.
 export async function fetchTranscript(videoId: string): Promise<string> {
+  // The youtube-transcript library uses the global `fetch`. Vercel's default
+  // Node fetch does not include a realistic User‑Agent, causing YouTube to
+  // block the request. We temporarily replace `globalThis.fetch` with a
+  // version that adds a common browser User‑Agent header.
+  const originalFetch = (globalThis as any).fetch as typeof fetch
+  ;(globalThis as any).fetch = fetchWithBrowserHeaders as any
   let items
   try {
     items = await YoutubeTranscript.fetchTranscript(videoId)
@@ -35,6 +42,9 @@ export async function fetchTranscript(videoId: string): Promise<string> {
     throw new TranscriptError(
       "No captions available for this video. Only captioned videos can be used for training.",
     )
+  } finally {
+    // Restore the original fetch to avoid side‑effects for other code.
+    ;(globalThis as any).fetch = originalFetch
   }
   if (!items || items.length === 0) {
     throw new TranscriptError("Transcript was empty. This video has no usable captions.")
