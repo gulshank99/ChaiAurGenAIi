@@ -29,22 +29,54 @@ export class TranscriptError extends Error {}
 // ---- Transcript fetch via captions (BRD 5.3 / 8.2) ----
 // Videos without captions are rejected, not run through speech-to-text.
 export async function fetchTranscript(videoId: string): Promise<string> {
-  // The youtube-transcript library uses the global `fetch`. Vercel's default
-  // Node fetch does not include a realistic User‑Agent, causing YouTube to
-  // block the request. We temporarily replace `globalThis.fetch` with a
-  // version that adds a common browser User‑Agent header.
-  const originalFetch = (globalThis as any).fetch as typeof fetch
-  ;(globalThis as any).fetch = fetchWithBrowserHeaders as any
-  let items
+  // The youtube-transcript library accepts an optional `fetch` implementation
+  // via its second argument. Supplying our `fetchWithBrowserHeaders` avoids the
+  // need to globally monkey‑patch `fetch` and prevents recursion with Next.js'
+  // internal `patchFetch` wrapper.
+  let items;
   try {
-    items = await YoutubeTranscript.fetchTranscript(videoId)
-  } catch {
-    throw new TranscriptError(
-      "No captions available for this video. Only captioned videos can be used for training.",
-    )
-  } finally {
-    // Restore the original fetch to avoid side‑effects for other code.
-    ;(globalThis as any).fetch = originalFetch
+    items = await YoutubeTranscript.fetchTranscript(videoId, { fetch: fetchWithBrowserHeaders });
+  } catch (innerErr) {
+    // If a YouTube API key is configured, attempt to fetch captions via the
+    // official YouTube Data API as a fallback. This avoids IP‑based blocking
+    // because the request is authenticated.
+    const apiKey = process.env.YOUTUBE_API_KEY;
+    if (apiKey) {
+      try {
+        const captionListResp = await fetchWithBrowserHeaders(
+          `https://www.googleapis.com/youtube/v3/captions?part=snippet&videoId=${videoId}&key=${apiKey}`,
+        );
+        if (!captionListResp.ok) throw new Error('Caption list request failed');
+        const listData = await captionListResp.json();
+        const captionId = listData.items?.[0]?.id;
+        if (!captionId) throw new Error('No caption tracks found via API');
+        const captionResp = await fetchWithBrowserHeaders(
+          `https://www.googleapis.com/youtube/v3/captions/${captionId}?tfmt=srt&key=${apiKey}`,
+        );
+        if (!captionResp.ok) throw new Error('Caption download failed');
+        const srt = await captionResp.text();
+        // Convert simple SRT to the same shape expected (array of {text}).
+        const srtLines = srt.split(/\r?\n/);
+        const srtItems = [];
+        for (let i = 0; i < srtLines.length; i++) {
+          const line = srtLines[i].trim();
+          if (/^\d+$/.test(line)) {
+            // index line, skip
+            const text = srtLines[i + 2] ?? '';
+            srtItems.push({ text });
+            i += 3; // skip timestamp and blank line
+          }
+        }
+        items = srtItems as any;
+      } catch (apiErr) {
+        // If the API fallback also fails, fall through to the generic error.
+        console.error('YouTube API fallback failed:', apiErr);
+        throw innerErr;
+      }
+    } else {
+      // No API key – rethrow the original error to be handled below.
+      throw innerErr;
+    }
   }
   if (!items || items.length === 0) {
     throw new TranscriptError("Transcript was empty. This video has no usable captions.")

@@ -10,6 +10,9 @@
  * The function mirrors the native `fetch` signature so it can be used as a drop‑in
  * replacement for `globalThis.fetch` during caption fetching.
  */
+// Capture the native fetch implementation before any monkey‑patching occurs.
+const nativeFetch = (globalThis as any).fetch as typeof fetch;
+
 export async function fetchWithBrowserHeaders(
   input: RequestInfo,
   init?: RequestInit,
@@ -19,16 +22,18 @@ export async function fetchWithBrowserHeaders(
 
   // Preserve any existing headers while ensuring the User‑Agent is set.
   const existingHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
-  if (!existingHeaders.has("User-Agent")) {
-    existingHeaders.set("User-Agent", browserUserAgent);
-  }
+  // Override any existing User-Agent to ensure the request looks like a modern
+  // Chrome browser. This prevents the library's default header from being used.
+  existingHeaders.set("User-Agent", browserUserAgent);
 
   const mergedInit: RequestInit = {
     ...init,
     headers: existingHeaders,
   };
 
-  return fetch(input, mergedInit);
+  // Use the captured native fetch to avoid recursive calls when this helper
+  // is installed as a global fetch replacement.
+  return nativeFetch(input, mergedInit);
 }
 
 // Export a default for convenience when monkey‑patching.
